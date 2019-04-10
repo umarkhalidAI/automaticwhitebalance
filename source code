@@ -1,0 +1,188 @@
+import math
+import numpy as np
+import sys
+import os
+import glob
+import cv2 as cv
+
+def apply_mask(matrix, mask, fill_value):
+    masked = np.ma.array(matrix, mask=mask, fill_value=fill_value)
+    return masked.filled()
+
+def apply_threshold(matrix, low_value, high_value):
+    low_mask = matrix < low_value
+    matrix = apply_mask(matrix, low_mask, low_value)
+
+    high_mask = matrix > high_value
+    matrix = apply_mask(matrix, high_mask, high_value)
+
+    return matrix
+
+def simplest_cb(img, percent):
+    assert img.shape[2] == 3
+    assert percent > 0 and percent < 100
+
+    half_percent = percent / 200.0
+
+    channels = cv.split(img)
+
+    out_channels = []
+    for channel in channels:
+        assert len(channel.shape) == 2
+        # find the low and high precentile values (based on the input percentile)
+        height, width = channel.shape
+        vec_size = width * height
+        flat = channel.reshape(vec_size)
+
+        assert len(flat.shape) == 1
+
+        flat = np.sort(flat)
+
+        n_cols = flat.shape[0]
+
+        low_val = flat[int(math.floor(n_cols * half_percent))]
+        high_val = flat[int(math.ceil(n_cols * (1.0 - half_percent)))]
+
+       # print("Lowval: ", low_val)
+        #print("Highval: ", high_val)
+
+        # saturate below the low percentile and above the high percentile
+        thresholded = apply_threshold(channel, low_val, high_val)
+        # scale the channel
+        normalized = cv.normalize(thresholded, thresholded.copy(), 0, 255, cv.NORM_MINMAX)
+        out_channels.append(normalized)
+
+    return cv.merge(out_channels)
+
+def show(final):
+    print('display')
+    cv.imshow('Temple', final)
+
+
+
+def CLAHE_hist(img_1):
+    for c in range(3):
+        clahe = cv.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        img_1[:,:,c] = clahe.apply(img_1[:,:,c])
+    return img_1
+
+
+def rgbtoycc(img_3):
+    yuv = cv.cvtColor(img_3, cv.COLOR_BGR2YCrCb)
+    return yuv
+
+
+def white_balance(frame,img_o):
+    # here is the algorithm mentioned in the paper
+
+    #print(frame.shape)
+    arr = np.array(frame)
+    arr2=np.array(frame)
+    #print(arr.shape)
+
+    # the ranges below can be tuned according to the appliation requirements., I didn't strictly follow the paper ranges
+    location210 = np.where(arr[..., 0] >= 210, True, False)
+    location125 = np.where(arr[..., 1] >= 125, True, False)
+    location130 = np.where(arr[..., 1] <= 130, True, False)
+    location131 = np.where(arr[..., 2] <= 131, True, False)
+    location125_2 = np.where(arr[..., 2] >= 125, True, False)
+    location125n130 = np.logical_and(location125, location130)
+    location125_2n131 = np.logical_and(location125_2, location131)
+    final_locations = np.logical_and(location210, np.logical_and(location125n130, location125_2n131))
+    indices= np.argwhere(final_locations==True)
+    x=len(indices)
+    # y_avg = np.mean(np.extract(final_locations, frame[..., 0]))
+    # cr_avg = np.mean(np.extract(final_locations, frame[..., 1]))
+    # cb_avg = np.mean(np.extract(final_locations, frame[..., 2]))
+    indices2 = []
+
+    if (x > 0):
+        y_avg = np.mean(np.extract(final_locations, frame[..., 0]))
+        cr_avg = np.mean(np.extract(final_locations, frame[..., 1]))
+        cb_avg = np.mean(np.extract(final_locations, frame[..., 2]))
+        y_l = min(y_avg,255)
+        cb_l = min(cb_avg, 128)
+        cr_l = min(cr_avg,128)
+        y_u = max(y_avg, 255)
+        cb_u = max(cb_avg, 128)
+        cr_u = max(cr_avg, 128)
+
+        locationy_l = np.where(arr2[..., 0] >= y_l, True, False)
+        locationy_u = np.where(arr2[..., 1] <= y_u, True, False)
+        locationcb_l = np.where(arr2[..., 1] >= cb_l, True, False)
+        locationcb_u = np.where(arr2[..., 0] <= cb_u, True, False)
+        locationcr_l = np.where(arr2[..., 1] >= cr_l, True, False)
+        locationcr_u = np.where(arr2[..., 1] <= cr_u, True, False)
+        locationy = np.logical_and(locationy_l, locationy_u)
+        locationcr = np.logical_and(locationcr_l, locationcr_u)
+        locationcb = np.logical_and(locationcb_l, locationcb_u)
+        final_locations2 = np.logical_and(locationy, np.logical_and(locationcr, locationcb))
+        indices2 = np.argwhere(final_locations2 == True)
+        b_w = np.mean(np.extract(final_locations, img_o[..., 0]))
+        g_w = np.mean(np.extract(final_locations, img_o[..., 1]))
+        r_w = np.mean(np.extract(final_locations, img_o[..., 2]))
+        y_w = 0.299 *r_w + 0.587*g_w + 0.114*b_w
+        r_scale = y_w/r_w
+        g_scale = y_w/g_w
+        b_scale = y_w/b_w
+        # To calculate Y_average and R,G,B aveages of original pictures
+        img_o_ycc = cv.cvtColor(img_o.copy(), cv.COLOR_BGR2YCrCb)
+        r_gwa = np.mean(img_o_ycc[:,:,0])/np.mean(img_o[:,:,2])
+        g_gwa = np.mean(img_o_ycc[:, :, 0]) / np.mean(img_o[:, :, 1])
+        b_gwa = np.mean(img_o_ycc[:, :, 0]) / np.mean(img_o[:, :, 0])
+        r_avg_his = y_avg + 1.402 * (cr_avg - 128)
+        g_avg_his = y_avg - .34414 * (cb_avg - 128) - .71414 * (cr_avg - 128)
+        b_avg_his = y_avg + 1.772 * (cb_avg - 128)
+        if (b_avg_his + 3 >= g_avg_his) and (b_avg_his>r_avg_his):
+            r_factor = r_scale
+            g_factor = g_scale
+            b_factor = b_gwa
+            print(1)
+        elif (g_avg_his+3>r_avg_his>b_avg_his):
+            r_factor = r_scale
+            g_factor = g_gwa
+            b_factor = b_scale
+            print(2)
+                    #print(g_factor)
+        elif(r_avg_his>g_avg_his>b_avg_his):
+            r_factor = r_gwa
+            g_factor = g_scale
+            b_factor = b_scale
+            print(3)
+        else:
+
+            return simplest_cb(img_o, 1)
+        b, g, r = cv.split(img_o)
+        b_x = np.array(b) * b_factor
+        g_x = np.array(g) * g_factor
+        r_x = np.array(r)* r_factor
+        b_x_n=np.where(b_x > 255,255,b_x)
+        g_x_n=np.where(g_x > 255,255,g_x)
+        r_x_n=np.where(r_x > 255,255,r_x)
+        b_x_n = np.array(b_x_n, dtype=np.uint8)
+        g_x_n = np.array(g_x_n, dtype=np.uint8)
+        r_x_n = np.array(r_x_n, dtype=np.uint8)
+        img_n=cv.merge((b_x_n,g_x_n,r_x_n))
+
+    else:
+        #backup algorithm will work if the paper algorithm fails
+        return simplest_cb(img_o, 1)
+
+    return img_n
+
+if __name__=="__main__":
+
+
+    path = "C:\\Users\\Umar Khalid\\PycharmProjects\\White_balance_1\\face_qm\\*.*"
+    for bb, file in enumerate(glob.glob(path)):
+            print(bb, file)
+            img = cv.imread(file)
+            equalized = CLAHE_hist(img.copy())
+            img_ycc = rgbtoycc(equalized.copy())
+            c = white_balance(img_ycc.copy(), img.copy())
+            # writing the images in a folder output_images
+            cv.imwrite('C:\\Users\\Umar Khalid\\PycharmProjects\\Algo4_white_balance\\images_final_algoritm\\output{}.jpeg'.format(bb), c)
+            # wait
+            k = cv.waitKey(10)
+            # destroy the window
+            cv.destroyAllWindows()
